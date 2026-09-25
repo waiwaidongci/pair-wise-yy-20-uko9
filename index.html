@@ -38,6 +38,8 @@
     <section class="stage">
       <aside class="segments">
         <h2>已存方案</h2>
+        <p class="panel-hint">每次保存生成一个版本；展开方案可查看、载入或清理历史版本。</p>
+        <div id="lockTip" class="lock-tip" hidden>播放中，历史版本暂不可切换，停止后恢复。</div>
         <div id="savedList"></div>
       </aside>
       <section class="score">
@@ -51,6 +53,22 @@
       </aside>
     </section>
   </main>
+
+  <div id="dialog" class="dialog" hidden>
+    <form class="dialog-card" id="dialogForm">
+      <h3 id="dialogTitle">保存版本</h3>
+      <label for="dialogInput">本次调整小结
+        <textarea id="dialogInput" rows="3" required placeholder="如：第2小节小锣晚半拍"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="dialogCancel" class="btn-ghost">取消</button>
+        <button type="submit" id="dialogConfirm">保存版本</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
   <script src="./app.js"></script>
 </body>
 </html>
