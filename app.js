@@ -27,6 +27,8 @@ const pieceName = document.querySelector("#pieceName");
 const bpmInput = document.querySelector("#bpmInput");
 const loopSelect = document.querySelector("#loopSelect");
 const noteInput = document.querySelector("#noteInput");
+const summaryInput = document.querySelector("#summaryInput");
+const expandedPlans = new Set();
 
 function save() {
   localStorage.setItem(storageKey, JSON.stringify(state));
@@ -62,6 +64,134 @@ function renderGrid() {
   grid.innerHTML = [...header, ...rows].join("");
 }
 
+function formatTime(iso) {
+  const date = new Date(iso);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function snapshotState() {
+  return {
+    bpm: state.bpm,
+    loop: state.loop,
+    notes: [...state.notes],
+    pattern: state.pattern.map((row) => [...row])
+  };
+}
+
+function nextVersionNumber(plan) {
+  return plan.versions.reduce((max, version) => Math.max(max, version.version), 0) + 1;
+}
+
+function migrateLegacyPlan(plan) {
+  plan.versions = [{
+    id: crypto.randomUUID(),
+    version: 1,
+    createdAt: plan.createdAt || new Date().toISOString(),
+    summary: "旧方案导入",
+    bpm: plan.bpm,
+    loop: plan.loop,
+    notes: [...(plan.notes || [])],
+    pattern: (plan.pattern || []).map((row) => [...row])
+  }];
+  plan.current = 1;
+  delete plan.bpm;
+  delete plan.loop;
+  delete plan.notes;
+  delete plan.pattern;
+  delete plan.createdAt;
+}
+
+function applyVersion(plan, version) {
+  state.pieceName = plan.name;
+  state.bpm = version.bpm;
+  state.loop = version.loop;
+  state.notes = [...version.notes];
+  state.pattern = version.pattern.map((row) => [...row]);
+  save();
+  render();
+}
+
+function loadPlan(plan) {
+  if (!plan.versions) migrateLegacyPlan(plan);
+  const version = plan.versions.find((entry) => entry.version === plan.current) || plan.versions[plan.versions.length - 1];
+  applyVersion(plan, version);
+}
+
+function loadVersion(plan, versionNumber) {
+  const version = plan.versions.find((entry) => entry.version === versionNumber);
+  if (!version) return;
+  if (version.version === plan.current) {
+    applyVersion(plan, version);
+    return;
+  }
+  const restored = {
+    id: crypto.randomUUID(),
+    version: nextVersionNumber(plan),
+    createdAt: new Date().toISOString(),
+    summary: `恢复自 v${version.version}`,
+    bpm: version.bpm,
+    loop: version.loop,
+    notes: [...version.notes],
+    pattern: version.pattern.map((row) => [...row])
+  };
+  plan.versions.push(restored);
+  plan.current = restored.version;
+  applyVersion(plan, restored);
+}
+
+function cleanupPlan(plan) {
+  plan.versions = plan.versions.filter((version) => version.version >= plan.current);
+  save();
+  renderSidebars();
+}
+
+function renderSaved() {
+  if (!state.saved.length) {
+    savedList.innerHTML = "<p>还没有保存方案。</p>";
+    return;
+  }
+  const locked = Boolean(timer);
+  const html = state.saved.map((item) => {
+    if (!item.versions) {
+      return `
+        <button class="saved-item" type="button" data-load="${item.id}" ${locked ? "disabled" : ""}>
+          <strong>${item.name}</strong><br><span>${item.bpm}BPM · ${item.notes.length}条批注</span>
+        </button>
+      `;
+    }
+    const expanded = expandedPlans.has(item.id);
+    const versions = [...item.versions].sort((a, b) => b.version - a.version);
+    const hasEarlier = item.versions.some((version) => version.version < item.current);
+    return `
+      <article class="saved-item">
+        <div class="saved-head">
+          <button class="saved-load" type="button" data-load="${item.id}" ${locked ? "disabled" : ""}>
+            <strong>${item.name}</strong><br>
+            <span>当前 v${item.current} · 共${item.versions.length}个版本</span>
+          </button>
+          <button class="saved-toggle" type="button" data-toggle="${item.id}" aria-expanded="${expanded}">${expanded ? "收起" : "版本"}</button>
+        </div>
+        ${expanded ? `
+          <div class="version-list">
+            ${versions.map((version) => `
+              <div class="version-row ${version.version === item.current ? "current" : ""}">
+                <div class="version-meta">
+                  <strong>v${version.version}</strong>${version.version === item.current ? '<span class="current-tag">当前</span>' : ""}<time>${formatTime(version.createdAt)}</time>
+                  <p>${version.summary}</p>
+                </div>
+                <button type="button" data-load-version data-plan="${item.id}" data-version="${version.version}" ${locked ? "disabled" : ""}>载入</button>
+              </div>
+            `).join("")}
+            ${hasEarlier ? '<button class="cleanup" type="button" data-cleanup="' + item.id + '">清理更早记录</button>' : ""}
+          </div>
+        ` : ""}
+      </article>
+    `;
+  }).join("");
+  savedList.innerHTML = locked ? html + '<p class="lock-hint">播放中，停止后才能切换版本。</p>' : html;
+}
+
 function renderSidebars() {
   const filledByMeasure = [0, 1, 2, 3].map((measure) => {
     const start = measure * 4;
@@ -76,11 +206,7 @@ function renderSidebars() {
     <article class="note"><p>${note}</p></article>
   `).join("") : "<p>暂无批注。</p>";
 
-  savedList.innerHTML = state.saved.length ? state.saved.map((item) => `
-    <button class="saved-item" type="button" data-load="${item.id}">
-      <strong>${item.name}</strong><br><span>${item.bpm}BPM · ${item.notes.length}条批注</span>
-    </button>
-  `).join("") : "<p>还没有保存方案。</p>";
+  renderSaved();
 }
 
 function render() {
@@ -166,39 +292,65 @@ document.querySelector("#playBtn").addEventListener("click", () => {
   playhead = currentRange()[0];
   tick();
   timer = setInterval(tick, 60000 / state.bpm);
+  renderSidebars();
 });
 
 document.querySelector("#stopBtn").addEventListener("click", () => {
   clearInterval(timer);
   timer = null;
   document.querySelectorAll(".cell.playing").forEach((cell) => cell.classList.remove("playing"));
+  renderSidebars();
 });
 
 document.querySelector("#saveBtn").addEventListener("click", () => {
-  state.saved.unshift({
+  const name = state.pieceName || "未命名片段";
+  const summary = summaryInput.value.trim() || "未填写小结";
+  let plan = state.saved.find((entry) => entry.name === name);
+  if (plan && !plan.versions) migrateLegacyPlan(plan);
+  if (!plan) {
+    plan = { id: crypto.randomUUID(), name, versions: [], current: 0 };
+    state.saved.unshift(plan);
+  }
+  const version = {
     id: crypto.randomUUID(),
-    name: state.pieceName || "未命名片段",
-    bpm: state.bpm,
-    loop: state.loop,
-    notes: [...state.notes],
-    pattern: state.pattern.map((row) => [...row]),
-    createdAt: new Date().toISOString()
-  });
+    version: nextVersionNumber(plan),
+    createdAt: new Date().toISOString(),
+    summary,
+    ...snapshotState()
+  };
+  plan.versions.push(version);
+  plan.current = version.version;
+  summaryInput.value = "";
   save();
   renderSidebars();
 });
 
 savedList.addEventListener("click", (event) => {
-  const id = event.target.closest("[data-load]")?.dataset.load;
-  const item = state.saved.find((entry) => entry.id === id);
-  if (!item) return;
-  state.pieceName = item.name;
-  state.bpm = item.bpm;
-  state.loop = item.loop;
-  state.notes = [...item.notes];
-  state.pattern = item.pattern.map((row) => [...row]);
-  save();
-  render();
+  const toggle = event.target.closest("[data-toggle]");
+  if (toggle) {
+    const id = toggle.dataset.toggle;
+    if (expandedPlans.has(id)) expandedPlans.delete(id);
+    else expandedPlans.add(id);
+    renderSidebars();
+    return;
+  }
+  const cleanup = event.target.closest("[data-cleanup]");
+  if (cleanup) {
+    const plan = state.saved.find((entry) => entry.id === cleanup.dataset.cleanup);
+    if (plan && window.confirm("确定清理当前版本之前的所有记录吗？")) cleanupPlan(plan);
+    return;
+  }
+  if (timer) return;
+  const versionButton = event.target.closest("[data-load-version]");
+  if (versionButton) {
+    const plan = state.saved.find((entry) => entry.id === versionButton.dataset.plan);
+    if (plan) loadVersion(plan, Number(versionButton.dataset.version));
+    return;
+  }
+  const load = event.target.closest("[data-load]");
+  if (!load) return;
+  const plan = state.saved.find((entry) => entry.id === load.dataset.load);
+  if (plan) loadPlan(plan);
 });
 
 render();
